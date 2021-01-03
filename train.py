@@ -5,9 +5,8 @@ import torchvision
 from torch.utils.tensorboard import SummaryWriter
 import random
 
-from per_channel_unet.unet import UNet
-from per_channel_unet.preprocess import preprocess, resize
-from utils.image import grayscale_to_3_channel
+from per_channel_unet.unet import YUVUNet, UNet
+from per_channel_unet.preprocess import preprocess, resize, postprocess
 
 import sys
 
@@ -18,16 +17,22 @@ def main():
 
     writer = SummaryWriter()
 
-    if len(sys.argv) == 2:
-        model = torch.load(sys.argv[1]).to('cuda')
+    if False:
+        y_model = UNet(n_channels=1, tile_size=256).to('cuda')
+        u_model = UNet(n_channels=1, tile_size=256).to('cuda')
+        v_model = UNet(n_channels=1, tile_size=256).to('cuda')
     else:
-        model = UNet(n_channels=1, tile_size=512).to('cuda')
+        y_model = torch.load('y_wow_batch_2_5400.model').to('cuda')
+        u_model = torch.load('u_wow_batch_2_5400.model').to('cuda')
+        v_model = torch.load('v_wow_batch_2_5400.model').to('cuda')
 
     lr = 1e-6
     idx = 0
 
     criterion = nn.MSELoss(reduction='sum')
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    y_optimizer = optim.SGD(y_model.parameters(), lr=lr, momentum=0.9)
+    u_optimizer = optim.SGD(u_model.parameters(), lr=lr, momentum=0.9)
+    v_optimizer = optim.SGD(v_model.parameters(), lr=lr, momentum=0.9)
 
     for t in range(10000):
         data = torchvision.datasets.ImageFolder(root='G:/workspace/cheap-dlss-torch/media/wow', transform=preprocess)
@@ -54,18 +59,39 @@ def main():
                 lowres_batch = resize(image_batch).to('cuda')
                 answer_batch = image_batch.to('cuda')
 
-                y_pred = model(lowres_batch, answer_batch)
+                y_lowres, u_lowres, v_lowres = torch.chunk(lowres_batch, chunks=3, dim=-3)
+                y_answer, u_answer, v_answer = torch.chunk(answer_batch, chunks=3, dim=-3)
 
-                loss = criterion(y_pred, answer_batch)
+                y_pred = y_model(y_lowres, y_answer)
+                u_pred = u_model(u_lowres, u_answer)
+                v_pred = v_model(v_lowres, v_answer)
 
-                optimizer.zero_grad()
-                loss.backward()
+                # y_pred = torch.clamp(y_pred, min=0.0, max=1.0)
+                # u_pred = torch.clamp(u_pred, min=0.0, max=1.0)
+                # v_pred = torch.clamp(v_pred, min=0.0, max=1.0)
 
-                optimizer.step()
+                y_loss = criterion(y_pred, y_answer)
+                u_loss = criterion(u_pred, u_answer)
+                v_loss = criterion(v_pred, v_answer)
 
-                writer.add_scalar('wow_batch_2_loss_overfit', loss.item(), idx)
+                y_optimizer.zero_grad()
+                u_optimizer.zero_grad()
+                v_optimizer.zero_grad()
 
-                loss_val = loss.item()
+                y_loss.backward()
+                u_loss.backward()
+                v_loss.backward()
+
+                y_optimizer.step()
+                u_optimizer.step()
+                v_optimizer.step()
+
+                writer.add_scalar('y_wow_batch_2_loss_overfit', y_loss.item(), idx)
+                writer.add_scalar('u_wow_batch_2_loss_overfit', u_loss.item(), idx)
+                writer.add_scalar('v_wow_batch_2_loss_overfit', v_loss.item(), idx)
+
+                loss_val = y_loss.item() + u_loss.item() + v_loss.item()
+                writer.add_scalar('wow_batch_2_loss_overfit', loss_val, idx)
 
                 loss_mean += loss_val
                 loss_var += loss_val * loss_val
@@ -79,26 +105,33 @@ def main():
 
                     print(idx, len(pool), loss_mean, loss_var)
 
-                    if loss_mean < 10 or loss_var < 10:
-                        writer.add_image('wow_image_batch_pred', grayscale_to_3_channel(y_pred),
+                    torch.save(y_model, f'y_wow_batch_2_{idx}.model')
+                    torch.save(y_model, f'u_wow_batch_2_{idx}.model')
+                    torch.save(y_model, f'v_wow_batch_2_{idx}.model')
+
+                    if loss_mean < 20 or loss_var < 10:
+                        pred = torch.cat([y_pred, u_pred, v_pred], -3)
+                        writer.add_image('wow_image_batch_pred',
+                                         torch.clamp(postprocess(pred[0]), min=0.0, max=1.0),
                                          global_step=idx,
-                                         dataformats='HWC')
-                        writer.add_image('wow_image_batch_answer', grayscale_to_3_channel(answer_batch),
+                                         dataformats='CHW')
+                        writer.add_image('wow_image_batch_answer',
+                                         torch.clamp(postprocess(answer_batch[0]), min=0.0, max=1.0),
                                          global_step=idx,
-                                         dataformats='HWC')
+                                         dataformats='CHW')
                         break
                     else:
                         loss_mean = 0
                         loss_var = 0
 
-                    torch.save(model.state_dict(), f'wow_batch_2_{idx}.state_dict')
-                    torch.save(model, f'wow_batch_2_{idx}.model')
-
                 idx += 1
 
-            print(idx, loss.item())
+            print(idx, loss_val)
 
-            pool_exponent += 1
+            if pool_exponent < 9:
+                pool_exponent += 1
+            else:
+                pool_exponent = 0
             pool_count = 0
             pool.clear()
 

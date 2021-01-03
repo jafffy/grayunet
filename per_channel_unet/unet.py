@@ -133,3 +133,22 @@ class UNet(nn.Module):
         x = torch.add(x, skip_connection)
 
         return self.fc(x)
+
+
+class YUVUNet(nn.Module):
+    def __init__(self, tile_size):
+        super().__init__()
+
+        self.y_unet = UNet(1, tile_size)
+        self.u_unet = UNet(1, tile_size)
+        self.v_unet = UNet(1, tile_size)
+
+    def forward(self, x, inj):
+        x_y, x_u, x_v = torch.chunk(x, chunks=3, dim=-3)
+        inj_y, inj_u, inj_v = torch.chunk(inj, chunks=3, dim=-3)
+
+        x_y = self.y_unet(x_y, inj_y)
+        x_u = self.u_unet(x_u, inj_u)
+        x_v = self.v_unet(x_v, inj_v)
+
+        return torch.cat([x_y, x_u, x_v], -3)
